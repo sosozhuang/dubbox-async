@@ -4,6 +4,9 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
@@ -21,11 +24,20 @@ import com.alibaba.dubbo.remoting.exchange.Response;
 import com.alibaba.dubbo.remoting.exchange.ResponseCallback;
 import com.alibaba.dubbo.remoting.exchange.completable.CompletableResponseFuture;
 import com.alibaba.dubbo.rpc.Result;
-import com.alibaba.dubbo.rpc.RpcException;
 
 public class CompletableDefaultFuture implements CompletableResponseFuture {
 	private static final Logger LOGGER = LoggerFactory
 			.getLogger(CompletableDefaultFuture.class);
+
+	private static final ScheduledExecutorService SERVICE = Executors
+			.newScheduledThreadPool(1, new ThreadFactory() {
+				@Override
+				public Thread newThread(Runnable r) {
+					Thread t = new Thread(r, "DubboResponseTimeout");
+					t.setDaemon(true);
+					return t;
+				}
+			});
 
 	private final Channel channel;
 	private final Request request;
@@ -52,14 +64,12 @@ public class CompletableDefaultFuture implements CompletableResponseFuture {
 		this.start = System.currentTimeMillis();
 		FutureAndChannelHolder.put(id, this, channel);
 		future = CompletableFuture.supplyAsync(this::waitAsync);
-		future.applyToEither(FutureAndChannelHolder.failAfter(this),
-				Function.identity())
-				.thenAccept(result -> {
-					if (callback != null) {
-						invokeCallback(callback);
-					}
-				})
-				.exceptionally(this::handleException);
+		future.applyToEither(failAfter(),
+				Function.identity()).thenAccept(result -> {
+			if (callback != null) {
+				invokeCallback(callback);
+			}
+		}).exceptionally(this::handleException);
 	}
 
 	private Object waitAsync() {
@@ -83,14 +93,29 @@ public class CompletableDefaultFuture implements CompletableResponseFuture {
 		}
 	}
 	
+	private CompletableFuture<Object> failAfter() {
+		final CompletableFuture<Object> promise = new CompletableFuture<>();
+		SERVICE.schedule(() -> {
+			if (!isDone()) {
+				// create exception response.
+				Response timeoutResponse = new Response(getId());
+				// set timeout status.
+				timeoutResponse.setStatus(isSent() ? Response.SERVER_TIMEOUT
+						: Response.CLIENT_TIMEOUT);
+				timeoutResponse.setErrorMessage(getTimeoutMessage(true));
+				// handle response.
+				FutureAndChannelHolder.received(getChannel(), timeoutResponse);
+			}
+			return promise.complete(null);
+			}, getTimeout(), TimeUnit.MILLISECONDS);
+		return promise;
+	}
+
 	private Void handleException(Throwable throwable) {
 		Response exceptionResponse = new Response(getId());
-		exceptionResponse
-				.setStatus(Response.SERVICE_ERROR);
-		exceptionResponse
-				.setErrorMessage(throwable.getMessage());
-		FutureAndChannelHolder.received(channel,
-				exceptionResponse);
+		exceptionResponse.setStatus(Response.SERVICE_ERROR);
+		exceptionResponse.setErrorMessage(throwable.getMessage());
+		FutureAndChannelHolder.received(channel, exceptionResponse);
 		if (callback != null) {
 			invokeCallback(callback);
 		}
@@ -258,10 +283,10 @@ public class CompletableDefaultFuture implements CompletableResponseFuture {
 	long getStartTimestamp() {
 		return start;
 	}
-	
+
 	public Request getRequest() {
-        return request;
-    }
+		return request;
+	}
 
 	void doReceived(Response response) {
 		lock.lock();
