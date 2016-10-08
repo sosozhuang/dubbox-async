@@ -49,7 +49,6 @@ public class CompletableDefaultFuture implements CompletableResponseFuture {
 	private final long start;
 	private volatile long sent;
 	private volatile Response response;
-	private volatile ResponseCallback callback;
 
 	public CompletableDefaultFuture(final Channel channel, Request request,
 			final int timeout) {
@@ -64,12 +63,8 @@ public class CompletableDefaultFuture implements CompletableResponseFuture {
 		this.start = System.currentTimeMillis();
 		FutureAndChannelHolder.put(id, this, channel);
 		future = CompletableFuture.supplyAsync(this::waitAsync);
-		future.applyToEither(failAfter(),
-				Function.identity()).thenAccept(result -> {
-			if (callback != null) {
-				invokeCallback(callback);
-			}
-		}).exceptionally(this::handleException);
+		future.applyToEither(failAfter(), Function.identity()).exceptionally(
+				this::handleException);
 	}
 
 	private Object waitAsync() {
@@ -92,7 +87,7 @@ public class CompletableDefaultFuture implements CompletableResponseFuture {
 			throw new RuntimeException(e);
 		}
 	}
-	
+
 	private CompletableFuture<Object> failAfter() {
 		final CompletableFuture<Object> promise = new CompletableFuture<>();
 		SERVICE.schedule(() -> {
@@ -107,7 +102,7 @@ public class CompletableDefaultFuture implements CompletableResponseFuture {
 				FutureAndChannelHolder.received(getChannel(), timeoutResponse);
 			}
 			return promise.complete(null);
-			}, getTimeout(), TimeUnit.MILLISECONDS);
+		}, getTimeout(), TimeUnit.MILLISECONDS);
 		return promise;
 	}
 
@@ -116,9 +111,7 @@ public class CompletableDefaultFuture implements CompletableResponseFuture {
 		exceptionResponse.setStatus(Response.SERVICE_ERROR);
 		exceptionResponse.setErrorMessage(throwable.getMessage());
 		FutureAndChannelHolder.received(channel, exceptionResponse);
-		if (callback != null) {
-			invokeCallback(callback);
-		}
+		LOGGER.warn("future throw an exception: ", throwable);
 		return null;
 	}
 
@@ -178,67 +171,9 @@ public class CompletableDefaultFuture implements CompletableResponseFuture {
 
 	@Override
 	public void setCallback(ResponseCallback callback) {
-		if (isDone()) {
-			invokeCallback(callback);
-		} else {
-			boolean isdone = false;
-			lock.lock();
-			try {
-				if (!isDone()) {
-					this.callback = callback;
-				} else {
-					isdone = true;
-				}
-			} finally {
-				lock.unlock();
-			}
-			if (isdone) {
-				invokeCallback(callback);
-			}
-		}
-	}
-
-	private void invokeCallback(ResponseCallback c) {
-		ResponseCallback callbackCopy = c;
-		if (callbackCopy == null) {
-			throw new NullPointerException("callback cannot be null.");
-		}
-		c = null;
-		Response res = response;
-		if (res == null) {
-			throw new IllegalStateException("response cannot be null. url:"
-					+ channel.getUrl());
-		}
-
-		if (res.getStatus() == Response.OK) {
-			try {
-				callbackCopy.done(res.getResult());
-			} catch (Exception e) {
-				LOGGER.error(
-						"callback invoke error .reasult:" + res.getResult()
-								+ ",url:" + channel.getUrl(), e);
-			}
-		} else if (res.getStatus() == Response.CLIENT_TIMEOUT
-				|| res.getStatus() == Response.SERVER_TIMEOUT) {
-			try {
-				TimeoutException te = new TimeoutException(
-						res.getStatus() == Response.SERVER_TIMEOUT, channel,
-						res.getErrorMessage());
-				callbackCopy.caught(te);
-			} catch (Exception e) {
-				LOGGER.error("callback invoke error ,url:" + channel.getUrl(),
-						e);
-			}
-		} else {
-			try {
-				RuntimeException re = new RuntimeException(
-						res.getErrorMessage());
-				callbackCopy.caught(re);
-			} catch (Exception e) {
-				LOGGER.error("callback invoke error ,url:" + channel.getUrl(),
-						e);
-			}
-		}
+		throw new UnsupportedOperationException(
+				CompletableDefaultFuture.class.getSimpleName()
+						+ " does not support setCallback");
 	}
 
 	@Override
